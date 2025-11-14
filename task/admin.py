@@ -4,7 +4,7 @@ from .models import CustomUser
 from django import forms
 from django.contrib.auth.forms import ReadOnlyPasswordHashField
 from django.utils.translation import gettext_lazy as _
-from task.models import Task, Assignment, Notification
+from task.models import Task, Assignment, Notification, NotificationState
 from django.utils import timezone
 
 class CustomUserCreationForm(forms.ModelForm):
@@ -118,6 +118,11 @@ class TaskAdmin(admin.ModelAdmin):
         updated = queryset.update(status=Task.Status.COMPLETED, completed_at=timezone.now())
         self.message_user(request, f"{updated} task(s) marked as completed.")
     mark_completed.short_description = "Mark selected tasks as completed"
+    
+
+@admin.register(NotificationState)
+class NotificationStateAdmin(admin.ModelAdmin):
+    list_display = ("name", "last_calculation")
     
     
 admin.site.register(CustomUser, CustomUserAdmin)

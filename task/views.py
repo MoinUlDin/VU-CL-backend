@@ -7,7 +7,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.conf import settings
 from rest_framework.parsers import MultiPartParser, FormParser
-from .models import Task, Assignment, Notification, Comment, TaskFile
+from .models import Task, Assignment, Notification, Comment, TaskFile, CustomUser
 from rest_framework import status
 from django.db.models import Count, Q
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -25,15 +25,70 @@ from .serializers import (
     ChangePasswordSerializer, PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer, InactiveUserSerializer,
     TaskSerializer, AssignmentSerializer, NotificationSerializer,
-    CommentSerializer, TaskFileSerializer
+    CommentSerializer, TaskFileSerializer, UserProfileSerializer
 )
-from task.utils.notifications import create_notification
+from django.core.exceptions import PermissionDenied
+from rest_framework import generics
+from rest_framework.request import Request
+from task.utils.notifications import create_notification, ensure_daily_notifications
 import logging
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
-User = get_user_model()
 token_generator = PasswordResetTokenGenerator()
+
+
+class UserProfileUpdateView(generics.RetrieveUpdateAPIView):
+    """
+    Retrieve / update a user's profile.
+    - GET /users/me/  -> returns current user
+    - PATCH /users/me/ -> update current user
+    - Admins may call /users/<pk>/ to update another user
+    """
+    queryset = User.objects.all()
+    serializer_class = UserProfileSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        """
+        If URL provides a pk and it's different than the logged-in user,
+        only allow if the requesting user is an Admin.
+        If no pk provided, return the current user.
+        """
+        user = self.request.user
+        pk = self.kwargs.get("pk", None)
+
+        if pk is None:
+            return user
+
+        # allow current user to access own record
+        if str(user.pk) == str(pk):
+            return user
+
+        # allow admins to access others
+        if getattr(user, "role", None) == User.Roles.ADMIN:
+            return get_object_or_404(User, pk=pk)
+
+        raise PermissionDenied("You do not have permission to access this resource.")
+
+    def perform_update(self, serializer):
+        """
+        Handle picture removal if client explicitly clears picture.
+        - If client sends "picture": null (JSON) or sets picture empty in multipart,
+          delete existing file and set field to None.
+        """
+        request: Request = self.request
+        # When using JSON payload with {"picture": null}, request.data['picture'] will be None
+        if "picture" in request.data and request.data.get("picture") in [None, "", "null"]:
+            # delete stored file (if any) to avoid stale files
+            instance = serializer.instance
+            if instance and instance.picture:
+                instance.picture.delete(save=False)
+            serializer.save(picture=None)
+            return
+
+        # otherwise normal save (file upload handled by serializer)
+        serializer.save()
 
 
 class SignupView(APIView):
@@ -552,6 +607,18 @@ class NotificationViewSet(viewsets.ModelViewSet):
         # allow managers/admins to create notifications; the serializer expects a recipient field
         serializer.save()
 
+    def list(self, request, *args, **kwargs):
+        """
+        Override list to ensure daily notification generation runs lazily
+        on first fetch of the day.
+        """
+        print("\n\n List Called \n")
+        try:
+            ensure_daily_notifications(threshold_days=2)
+        except Exception as e:
+            pass
+
+        return super().list(request, *args, **kwargs)
 
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):

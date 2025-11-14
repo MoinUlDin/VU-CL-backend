@@ -101,6 +101,24 @@ class AuthTokenSerializer(TokenObtainPairSerializer):
 
         return data
 
+class UserProfileSerializer(serializers.ModelSerializer):
+    picture = serializers.ImageField(required=False, allow_null=True, use_url=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "department",
+            "employee_number",
+            "picture",
+            "is_active",
+            "role",
+        ]
+        read_only_fields = ["id", "username", "email", "is_active", "role"]
 
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True, required=True)

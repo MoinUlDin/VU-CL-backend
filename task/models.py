@@ -134,6 +134,7 @@ class Task(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name="created_tasks")
     is_deleted = models.BooleanField(default=False)
+    is_notified = models.BooleanField(default=False)
     meta = models.JSONField(null=True, blank=True)
 
     def __str__(self):
@@ -183,6 +184,18 @@ class Notification(models.Model):
         return f'User: {self.recipient.first_name} === Title: {self.title}'
     class Meta:
         indexes = [models.Index(fields=["recipient", "read"])]
+
+
+class NotificationState(models.Model):
+    """
+    Single-row state store for notification generation.
+    We'll use name='task_notifications' (unique) so it's easy to fetch.
+    """
+    name = models.CharField(max_length=64, unique=True)  # use 'task_notifications'
+    last_calculation = models.DateField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.name}: {self.last_calculation}"
 
 
 class Comment(models.Model):

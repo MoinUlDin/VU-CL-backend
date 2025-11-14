@@ -9,7 +9,7 @@ from .views import (
     NotificationViewSet,CommentViewSet, TaskFileViewSet,
     MembersOnly,AdminManagerDashboard, MarkTaskStatusAPIView,
     NotificationMarkReadAPIView, NotificationMarkAllReadAPIView,
-    MemberDashboard,
+    MemberDashboard,UserProfileUpdateView
 
 )
 
@@ -24,6 +24,11 @@ router.register(r"task-files", TaskFileViewSet, basename="taskfile")
 
 urlpatterns = [
     path("", include(router.urls)),
+    # current user
+    path("profile/me/", UserProfileUpdateView.as_view(), name="user-profile-me"),
+    # admin or self by id
+    path("profile/<int:pk>/", UserProfileUpdateView.as_view(), name="user-profile-detail"),
+    
     path("auth/signup/", SignupView.as_view(), name="auth-signup"),
     path("auth/login/", AuthTokenView.as_view(), name="token_obtain_pair"),
     path("status/<uuid:pk>/", MarkTaskStatusAPIView.as_view(), name="task_status"),
