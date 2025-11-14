@@ -16,6 +16,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
 from django.db import transaction
+from datetime import datetime, timedelta, date
+from io import StringIO
+
+from django.http import HttpResponse
 from rest_framework.decorators import action
 from .permissions import  RolePermission, IsTaskAssigneeOrManagerOrAdmin, IsAdminOrReadOnly
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -31,7 +35,8 @@ from django.core.exceptions import PermissionDenied
 from rest_framework import generics
 from rest_framework.request import Request
 from task.utils.notifications import create_notification, ensure_daily_notifications
-import logging
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+import logging, csv
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
@@ -45,6 +50,7 @@ class UserProfileUpdateView(generics.RetrieveUpdateAPIView):
     - PATCH /users/me/ -> update current user
     - Admins may call /users/<pk>/ to update another user
     """
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     queryset = User.objects.all()
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
@@ -749,7 +755,7 @@ class AdminManagerDashboard(APIView):
         # Users excluding admins - annotate counts of assigned tasks and completed assigned tasks
         users_qs = (
             User.objects
-            .filter(role=User.Roles.MEMBER)
+            .exclude(role=User.Roles.ADMIN)
             .annotate(
                 total_tasks=Count("assignments", distinct=True),
                 completed_tasks=Count(
@@ -849,3 +855,182 @@ class MemberDashboard(APIView):
 
         return Response(payload, status=status.HTTP_200_OK)
 
+
+
+# reports
+
+
+class ReportsAPIView(APIView):
+    permission_classes = [IsAuthenticated, RolePermission]
+    # restrict to Admin / Manager (Members could be limited later)
+    allowed_roles = [User.Roles.MANAGER, User.Roles.ADMIN]
+
+    def _parse_date(self, s: str) -> date:
+        # Accept YYYY-MM-DD
+        return datetime.strptime(s, "%Y-%m-%d").date()
+
+    def _daterange(self, start: date, end: date):
+        cur = start
+        while cur <= end:
+            yield cur
+            cur += timedelta(days=1)
+
+    def get(self, request, *args, **kwargs):
+        """
+        Query params:
+          start_date=YYYY-MM-DD, end_date=YYYY-MM-DD (defaults -> last 30 days)
+          user_id, status, priority
+          group_by = day|week|month  (we implement day)
+          csv=1 -> returns CSV response
+          raw=1 -> for CSV return raw task rows instead of timeseries
+        Response JSON:
+        {
+          summary: { total_tasks, completed, in_progress, pending, overdue },
+          by_status: {PENDING: n, IN_PROGRESS: n, ...},
+          by_priority: {HIGH: n, MEDIUM: n, LOW: n},
+          timeseries: [{date:'2025-11-01', created:10, completed:4, pending:6}, ...]
+        }
+        """
+        params = request.query_params
+
+        # parse date range
+        today = timezone.localdate()
+        try:
+            end_date = self._parse_date(params.get("end_date")) if params.get("end_date") else today
+        except Exception:
+            return Response({"detail": "end_date must be YYYY-MM-DD"}, status=400)
+        try:
+            start_date = self._parse_date(params.get("start_date")) if params.get("start_date") else (end_date - timedelta(days=29))
+        except Exception:
+            return Response({"detail": "start_date must be YYYY-MM-DD"}, status=400)
+
+        if start_date > end_date:
+            return Response({"detail": "start_date must be <= end_date"}, status=400)
+
+        user_id = params.get("user_id")
+        status_filter = params.get("status")
+        priority_filter = params.get("priority")
+
+        # base queryset
+        qs = Task.objects.all()
+
+        # filter by user assignments (if user_id provided)
+        if user_id:
+            try:
+                uid = int(user_id)
+                qs = qs.filter(assignments__user_id=uid)
+            except Exception:
+                return Response({"detail": "user_id must be integer"}, status=400)
+
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        if priority_filter:
+            qs = qs.filter(priority=priority_filter)
+
+        # summary counts
+        total_tasks = qs.count()
+        completed_count = qs.filter(status=Task.Status.COMPLETED).count()
+        in_progress_count = qs.filter(status=Task.Status.IN_PROGRESS).count()
+        pending_count = qs.filter(status=Task.Status.PENDING).count()
+        overdue_count = qs.filter(
+            due_date__isnull=False,
+            due_date__lt=timezone.now(),
+        ).exclude(status=Task.Status.COMPLETED).count()
+
+        # aggregate by status/priority
+        by_status_qs = qs.values("status").annotate(count=Count("id"))
+        by_status = {row["status"]: row["count"] for row in by_status_qs}
+
+        by_priority_qs = qs.values("priority").annotate(count=Count("id"))
+        by_priority = {row["priority"]: row["count"] for row in by_priority_qs}
+
+        # timeseries: for each day in range compute created & completed counts and pending snapshot
+        timeseries = []
+        # To reduce DB queries, we'll prefetch date-based counts
+        # Note: using __date lookups—DB must support it (Postgres does).
+        created_counts = (
+            qs.filter(created_at__date__gte=start_date, created_at__date__lte=end_date)
+            .values("created_at__date")
+            .annotate(cnt=Count("id"))
+        )
+        created_map = {r["created_at__date"]: r["cnt"] for r in created_counts}
+
+        completed_counts = (
+            qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
+            .values("completed_at__date")
+            .annotate(cnt=Count("id"))
+        )
+        completed_map = {r["completed_at__date"]: r["cnt"] for r in completed_counts}
+
+        # For pending snapshot we can compute how many tasks exist with status PENDING on that day.
+        # A simple approach: pending_by_day = created - completed running sum. Simpler to return current pending count too.
+        running_created = 0
+        running_completed = 0
+
+        for d in self._daterange(start_date, end_date):
+            created = created_map.get(d, 0)
+            completed = completed_map.get(d, 0)
+            running_created += created
+            running_completed += completed
+            pending_snapshot = running_created - running_completed
+
+            timeseries.append({
+                "date": d.isoformat(),
+                "created": created,
+                "completed": completed,
+                "pending_snapshot": max(0, pending_snapshot),
+            })
+
+        payload = {
+            "summary": {
+                "total_tasks": total_tasks,
+                "completed": completed_count,
+                "in_progress": in_progress_count,
+                "pending": pending_count,
+                "overdue": overdue_count,
+            },
+            "by_status": by_status,
+            "by_priority": by_priority,
+            "timeseries": timeseries,
+        }
+
+        # CSV export?
+        if params.get("csv") == "1":
+            raw = params.get("raw") == "1"
+            filename = f"tasks_report_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
+            if raw:
+                # raw tasks rows
+                response = HttpResponse(content_type="text/csv")
+                response["Content-Disposition"] = f'attachment; filename="{filename}"'
+                writer = csv.writer(response)
+                writer.writerow(["id", "title", "status", "priority", "created_at", "completed_at", "due_date", "assignee"])
+                # we'll iterate filtered qs and include first assigned user if exists
+                tasks_qs = qs.select_related("created_by").prefetch_related("assignments__user")
+                for t in tasks_qs:
+                    assignee_name = None
+                    # take first assignment if exists
+                    a = getattr(t, "assignments", None)
+                    if a:
+                        first = t.assignments.first()
+                        if first:
+                            assignee_name = f"{first.user.get_full_name() or first.user.username}"
+                    writer.writerow([str(t.id), t.title, t.status, t.priority, (t.created_at.isoformat() if t.created_at else ""), (t.completed_at.isoformat() if t.completed_at else ""), (t.due_date.isoformat() if t.due_date else ""), assignee_name or ""])
+                return response
+            else:
+                # timeseries csv
+                response = HttpResponse(content_type="text/csv")
+                response["Content-Disposition"] = f'attachment; filename="{filename}"'
+                writer = csv.writer(response)
+                # header
+                writer.writerow(["date", "created", "completed", "pending_snapshot"])
+                for r in timeseries:
+                    writer.writerow([r["date"], r["created"], r["completed"], r["pending_snapshot"]])
+                # append summary lines
+                writer.writerow([])
+                writer.writerow(["summary", "value"])
+                for k, v in payload["summary"].items():
+                    writer.writerow([k, v])
+                return response
+
+        return Response(payload)

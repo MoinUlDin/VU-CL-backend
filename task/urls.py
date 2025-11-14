@@ -9,7 +9,7 @@ from .views import (
     NotificationViewSet,CommentViewSet, TaskFileViewSet,
     MembersOnly,AdminManagerDashboard, MarkTaskStatusAPIView,
     NotificationMarkReadAPIView, NotificationMarkAllReadAPIView,
-    MemberDashboard,UserProfileUpdateView
+    MemberDashboard,UserProfileUpdateView,ReportsAPIView,
 
 )
 
@@ -43,7 +43,8 @@ urlpatterns = [
     path("auth/active-users/", ActiveUsers.as_view(), name="active-users"),
     path("auth/recover-password/", PasswordRecoveryRequestView.as_view(), name="recover-password"),
     path("auth/confirm-password-recovery/", PasswordRecoveryConfirmView.as_view(), name="confirm-password-recovery"),
-    # Dashboards
+    # Dashboards & reports
     path("admin-dashboard/", AdminManagerDashboard.as_view(), name="admin-dashboard"),
     path("member-dashboard/", MemberDashboard.as_view(), name="member-dashboard"),
+    path("reports/", ReportsAPIView.as_view(), name="task_reports"),
 ]
