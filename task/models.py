@@ -1,0 +1,208 @@
+from django.db import models
+from django.contrib.auth.models import (
+    AbstractBaseUser, PermissionsMixin, BaseUserManager
+)
+import uuid
+from django.utils import timezone
+from django.core.mail import send_mail
+from django.utils.translation import gettext_lazy as _
+from django.conf import settings
+# import openai  # pip install openai
+
+# class Lesson(models.Model):
+#     title = models.CharField(max_length=255)
+#     content = models.TextField()
+
+#     def generate_summary(self):
+#         # don't set the key inside code; use env var
+#         openai.api_key = settings.OPENAI_API_KEY
+
+#         prompt = f"Summarize this lesson:\n\n{self.content}"
+#         try:
+#             resp = openai.ChatCompletion.create(
+#                 model="gpt-4o-mini",  # or whichever model you plan to use
+#                 messages=[{"role":"user","content":prompt}],
+#                 max_tokens=300,
+#             )
+#             summary = resp["choices"][0]["message"]["content"].strip()
+#             return summary
+#         except Exception as e:
+#             # handle/log errors (rate limits, invalid key, etc.)
+#             return f"Error generating summary: {e}"
+
+
+class CustomUserManager(BaseUserManager):
+    use_in_migrations = True
+
+    def _create_user(self, username, email, password, **extra_fields):
+        if not username:
+            raise ValueError("The Username must be set")
+        if not email:
+            raise ValueError("The Email must be set")
+        email = self.normalize_email(email)
+        username = self.model.normalize_username(username)
+        user = self.model(username=username, email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    # public create_user wrapper
+    def create_user(self, username, email, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', False)
+        extra_fields.setdefault('is_superuser', False)
+        return self._create_user(username, email, password, **extra_fields)
+
+    def create_superuser(self, username, email, password=None, **extra_fields):
+        extra_fields.setdefault('role', CustomUser.Roles.ADMIN)
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault('is_active', True)
+
+        if extra_fields.get('role') != CustomUser.Roles.ADMIN:
+            raise ValueError('Superuser must have role="Admin".')
+
+        return self._create_user(username, email, password, **extra_fields)
+
+
+class CustomUser(AbstractBaseUser, PermissionsMixin):
+    class Roles(models.TextChoices):
+        ADMIN = "Admin", "Admin"
+        MANAGER = "Manager", "Manager"
+        MEMBER = "Member", "Member"
+
+    first_name = models.CharField(_('first name'), max_length=150)
+    last_name = models.CharField(_('last name'), max_length=150)
+    username = models.CharField(_('username'), max_length=150, unique=True)
+    role = models.CharField(max_length=20, choices=Roles.choices, default=Roles.MEMBER)
+    email = models.EmailField(_('email address'), unique=True)
+
+
+    employee_number = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    department = models.CharField(max_length=50, null=True, blank=True)
+    picture = models.ImageField(upload_to='user_pictures/', null=True, blank=True)
+
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(default=timezone.now)
+
+    objects = CustomUserManager()
+
+
+    EMAIL_FIELD = 'email'
+    USERNAME_FIELD = 'username'
+    REQUIRED_FIELDS = ['email', 'first_name', 'last_name', 'employee_number']
+    class Meta:
+        indexes = [
+            models.Index(fields=["email"]),
+            models.Index(fields=["role"]),
+        ]
+        
+    def __str__(self):
+        return f"{self.username} ({self.get_full_name()})"
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+    def get_short_name(self):
+        return self.first_name
+
+    def email_user(self, subject, message, from_email=None, **kwargs):
+        send_mail(subject, message, from_email, [self.email], **kwargs)
+
+
+
+class Task(models.Model):
+    class Priority(models.TextChoices):
+        LOW = "LOW", "Low"
+        MEDIUM = "MEDIUM", "Medium"
+        HIGH = "HIGH", "High"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        COMPLETED = "COMPLETED", "Completed"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.MEDIUM, db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    due_date = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name="created_tasks")
+    is_deleted = models.BooleanField(default=False)
+    meta = models.JSONField(null=True, blank=True)
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["priority"]),
+            models.Index(fields=["due_date"]),
+        ]
+
+
+class Assignment(models.Model):
+    id = models.AutoField(primary_key=True)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="assignments")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="assignments")
+    assigned_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="assigned_tasks")
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    role_at_assignment = models.CharField(max_length=20, blank=True, null=True)
+
+    class Meta:
+        unique_together = ("task", "user")
+        indexes = [models.Index(fields=["user"]), models.Index(fields=["task"])]
+
+    def __str__(self):
+        return f'User: {self.user.first_name} === Task: {self.task.title}'
+
+
+class Notification(models.Model):
+    class Types(models.TextChoices):
+        ASSIGNMENT = "ASSIGNMENT", "Assignment"
+        DEADLINE = "DEADLINE_REMINDER", "Deadline Reminder"
+        UPDATE = "UPDATE", "Update"
+        COMMENT = "COMMENT", "Comment"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    recipient = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="notifications", db_index=True)
+    type = models.CharField(max_length=30, choices=Types.choices)
+    title= models.CharField(max_length=50)
+    message = models.TextField()
+    meta = models.JSONField(null=True, blank=True)
+    read = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'User: {self.recipient.first_name} === Title: {self.title}'
+    class Meta:
+        indexes = [models.Index(fields=["recipient", "read"])]
+
+
+class Comment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="comments")
+    author = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="comments")
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="replies")
+    is_deleted = models.BooleanField(default=False)
+    meta = models.JSONField(null=True, blank=True)
+
+
+class TaskFile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="files")
+    uploaded_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="uploaded_files")
+    file = models.FileField(upload_to="task_files/")
+    file_name = models.CharField(max_length=512, blank=True)
+    file_size = models.BigIntegerField(null=True, blank=True)
+    content_type = models.CharField(max_length=100, blank=True, null=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
