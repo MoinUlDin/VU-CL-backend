@@ -10,6 +10,7 @@ from .views import (
     MembersOnly,AdminManagerDashboard, MarkTaskStatusAPIView,
     NotificationMarkReadAPIView, NotificationMarkAllReadAPIView,
     MemberDashboard,UserProfileUpdateView,ReportsAPIView,
+    TaskCommentListView,
 
 )
 
@@ -31,6 +32,7 @@ urlpatterns = [
     
     path("auth/signup/", SignupView.as_view(), name="auth-signup"),
     path("auth/login/", AuthTokenView.as_view(), name="token_obtain_pair"),
+    path("<uuid:task_id>/comments/", TaskCommentListView.as_view(), name="task-comments"),
     path("status/<uuid:pk>/", MarkTaskStatusAPIView.as_view(), name="task_status"),
     # Notifications
     path("notification/<uuid:pk>/mark-read/", NotificationMarkReadAPIView.as_view(), name="notification-mark-read"),

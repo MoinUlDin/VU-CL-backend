@@ -713,6 +713,43 @@ class CommentViewSet(viewsets.ModelViewSet):
         # author is set by serializer create()
         serializer.save()
 
+class TaskCommentListView(generics.ListAPIView):
+    """
+    GET /api/tasks/{task_id}/comments/
+    - Admin / Manager: list comments for any task
+    - Member: list comments only for tasks they are assigned to (403 otherwise)
+    """
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated, RolePermission]
+    # Allowed roles used by RolePermission like in your ViewSet
+    allowed_roles = [User.Roles.MANAGER, User.Roles.MEMBER, User.Roles.ADMIN]
+
+    def get_task(self):
+        task_id = self.kwargs.get("task_id")
+        return get_object_or_404(Task, pk=task_id)
+
+    def get_queryset(self):
+        user = self.request.user
+        task = self.get_task()
+
+        # base queryset: comments for this task, excluding soft-deleted ones
+        qs = Comment.objects.filter(task=task, is_deleted=False).order_by("-created_at")
+
+        # Admin & Manager: full access
+        if getattr(user, "role", None) in (User.Roles.ADMIN, User.Roles.MANAGER):
+            return qs
+
+        # Member: only allowed if they are assigned to the task
+        if getattr(user, "role", None) == User.Roles.MEMBER:
+            assigned = task.assignments.filter(user=user).exists()
+            if assigned:
+                return qs
+            # not assigned => forbid access
+            raise PermissionDenied("You are not assigned to this task.")
+
+        # Fallback: deny
+        raise PermissionDenied("Insufficient permissions to view comments for this task.")
+    
 
 # TASKFILE VIEWSET (for file uploads)
 class TaskFileViewSet(viewsets.ModelViewSet):

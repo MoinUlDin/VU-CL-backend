@@ -261,6 +261,27 @@ class CommentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "author", "created_at", "edited_at"]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        author = instance.author
+        
+        if author.id == user.id:
+            data['self'] = True
+        else:
+            data['self'] = False
+        
+        data['author'] = {
+            "id": author.id,
+            "username": author.username,
+            "first_name": author.first_name,
+            "last_name": author.last_name,
+            "role": author.role,
+            "email": author.email
+        }
+        return data
+    
     def create(self, validated_data):
         request = self.context.get("request")
         user = getattr(request, "user", None)
